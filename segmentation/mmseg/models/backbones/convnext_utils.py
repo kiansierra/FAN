@@ -35,45 +35,63 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.models.fx_features import register_notrace_module
-from timm.models.helpers import named_apply, build_model_with_cfg
-from timm.models.layers import trunc_normal_, ClassifierHead, SelectAdaptivePool2d, DropPath
+from timm.models.helpers import build_model_with_cfg, named_apply
+from timm.models.layers import (
+    ClassifierHead,
+    DropPath,
+    SelectAdaptivePool2d,
+    trunc_normal_,
+)
 from timm.models.registry import register_model
 
+__all__ = ["ConvNeXt"]  # model_registry will add each entrypoint fn to this
 
 
-
-__all__ = ['ConvNeXt']  # model_registry will add each entrypoint fn to this
-
-
-def _cfg(url='', **kwargs):
+def _cfg(url="", **kwargs):
     return {
-        'url': url,
-        'num_classes': 1000, 'input_size': (3, 224, 224), 'pool_size': (7, 7),
-        'crop_pct': 0.875, 'interpolation': 'bicubic',
-        'mean': IMAGENET_DEFAULT_MEAN, 'std': IMAGENET_DEFAULT_STD,
-        'first_conv': 'stem.0', 'classifier': 'head.fc',
-        **kwargs
+        "url": url,
+        "num_classes": 1000,
+        "input_size": (3, 224, 224),
+        "pool_size": (7, 7),
+        "crop_pct": 0.875,
+        "interpolation": "bicubic",
+        "mean": IMAGENET_DEFAULT_MEAN,
+        "std": IMAGENET_DEFAULT_STD,
+        "first_conv": "stem.0",
+        "classifier": "head.fc",
+        **kwargs,
     }
 
 
 default_cfgs = dict(
-    convnext_tiny=_cfg(url="https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth"),
-    convnext_small=_cfg(url="https://dl.fbaipublicfiles.com/convnext/convnext_small_1k_224_ema.pth"),
-    convnext_base=_cfg(url="https://dl.fbaipublicfiles.com/convnext/convnext_base_1k_224_ema.pth"),
-    convnext_large=_cfg(url="https://dl.fbaipublicfiles.com/convnext/convnext_large_1k_224_ema.pth"),
-
-    convnext_tiny_hnf=_cfg(url=''),
-
+    convnext_tiny=_cfg(
+        url="https://dl.fbaipublicfiles.com/convnext/convnext_tiny_1k_224_ema.pth"
+    ),
+    convnext_small=_cfg(
+        url="https://dl.fbaipublicfiles.com/convnext/convnext_small_1k_224_ema.pth"
+    ),
+    convnext_base=_cfg(
+        url="https://dl.fbaipublicfiles.com/convnext/convnext_base_1k_224_ema.pth"
+    ),
+    convnext_large=_cfg(
+        url="https://dl.fbaipublicfiles.com/convnext/convnext_large_1k_224_ema.pth"
+    ),
+    convnext_tiny_hnf=_cfg(url=""),
     convnext_base_in22k=_cfg(
         # url="https://dl.fbaipublicfiles.com/convnext/convnext_base_22k_224.pth", num_classes=21841),
-        url="pretrained/convnext_base_22k_224.pth", num_classes=21841),
+        url="pretrained/convnext_base_22k_224.pth",
+        num_classes=21841,
+    ),
     convnext_large_in22k=_cfg(
-        url="https://dl.fbaipublicfiles.com/convnext/convnext_large_22k_224.pth", num_classes=21841),
+        url="https://dl.fbaipublicfiles.com/convnext/convnext_large_22k_224.pth",
+        num_classes=21841,
+    ),
     convnext_xlarge_in22k=_cfg(
-        url="https://dl.fbaipublicfiles.com/convnext/convnext_xlarge_22k_224.pth", num_classes=21841),
+        url="https://dl.fbaipublicfiles.com/convnext/convnext_xlarge_22k_224.pth",
+        num_classes=21841,
+    ),
 )
 
 
@@ -88,16 +106,24 @@ def _is_contiguous(tensor: torch.Tensor) -> bool:
 
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., group=1):
+    def __init__(
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.GELU,
+        drop=0.0,
+        group=1,
+    ):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        if group==1:
+        if group == 1:
             self.fc1 = nn.Linear(in_features, hidden_features)
             self.fc2 = nn.Linear(hidden_features, out_features)
         else:
-            self.fc1 = GroupLinear(in_features, hidden_features,group)
-            self.fc2 = GroupLinear(hidden_features, out_features,group)
+            self.fc1 = GroupLinear(in_features, hidden_features, group)
+            self.fc2 = GroupLinear(hidden_features, out_features, group)
         self.act = act_layer()
 
         self.drop = nn.Dropout(drop)
@@ -109,11 +135,20 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
+
+
 class ConvMlp(nn.Module):
-    """ MLP using 1x1 convs that keeps spatial dims
-    """
+    """MLP using 1x1 convs that keeps spatial dims"""
+
     def __init__(
-            self, in_features, hidden_features=None, out_features=None, act_layer=nn.ReLU, norm_layer=None, drop=0.):
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.ReLU,
+        norm_layer=None,
+        drop=0.0,
+    ):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -131,10 +166,10 @@ class ConvMlp(nn.Module):
         x = self.fc2(x)
         return x
 
+
 @register_notrace_module
 class LayerNorm2d(nn.LayerNorm):
-    r""" LayerNorm for channels_first tensors with 2d spatial dimensions (ie N, C, H, W).
-    """
+    r"""LayerNorm for channels_first tensors with 2d spatial dimensions (ie N, C, H, W)."""
 
     def __init__(self, normalized_shape, eps=1e-6):
         super().__init__(normalized_shape, eps=eps)
@@ -142,7 +177,12 @@ class LayerNorm2d(nn.LayerNorm):
     def forward(self, x) -> torch.Tensor:
         if _is_contiguous(x):
             return F.layer_norm(
-                x.permute(0, 2, 3, 1), self.normalized_shape, self.weight, self.bias, self.eps).permute(0, 3, 1, 2)
+                x.permute(0, 2, 3, 1),
+                self.normalized_shape,
+                self.weight,
+                self.bias,
+                self.eps,
+            ).permute(0, 3, 1, 2)
         else:
             s, u = torch.var_mean(x, dim=1, keepdim=True)
             x = (x - u) * torch.rsqrt(s + self.eps)
@@ -151,7 +191,7 @@ class LayerNorm2d(nn.LayerNorm):
 
 
 class ConvNeXtBlock(nn.Module):
-    """ ConvNeXt Block
+    """ConvNeXt Block
     There are two equivalent implementations:
       (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
       (2) DwConv -> Permute to (N, H, W, C); LayerNorm (channels_last) -> Linear -> GELU -> Linear; Permute back
@@ -166,17 +206,33 @@ class ConvNeXtBlock(nn.Module):
         ls_init_value (float): Init value for Layer Scale. Default: 1e-6.
     """
 
-    def __init__(self, dim, drop_path=0., ls_init_value=1e-6, conv_mlp=True, mlp_ratio=4, norm_layer=None):
+    def __init__(
+        self,
+        dim,
+        drop_path=0.0,
+        ls_init_value=1e-6,
+        conv_mlp=True,
+        mlp_ratio=4,
+        norm_layer=None,
+    ):
         super().__init__()
         if not norm_layer:
-            norm_layer = partial(LayerNorm2d, eps=1e-6) if conv_mlp else partial(nn.LayerNorm, eps=1e-6)
+            norm_layer = (
+                partial(LayerNorm2d, eps=1e-6)
+                if conv_mlp
+                else partial(nn.LayerNorm, eps=1e-6)
+            )
         mlp_layer = ConvMlp if conv_mlp else Mlp
         self.use_conv_mlp = conv_mlp
-        self.conv_dw = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
+        self.conv_dw = nn.Conv2d(
+            dim, dim, kernel_size=7, padding=3, groups=dim
+        )  # depthwise conv
         self.norm = norm_layer(dim)
         self.mlp = mlp_layer(dim, int(mlp_ratio * dim), act_layer=nn.GELU)
-        self.gamma = nn.Parameter(ls_init_value * torch.ones(dim)) if ls_init_value > 0 else None
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.gamma = (
+            nn.Parameter(ls_init_value * torch.ones(dim)) if ls_init_value > 0 else None
+        )
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
         shortcut = x
@@ -196,10 +252,19 @@ class ConvNeXtBlock(nn.Module):
 
 
 class ConvNeXtStage(nn.Module):
-
     def __init__(
-            self, in_chs, out_chs, stride=2, depth=2, dp_rates=None, ls_init_value=1.0, conv_mlp=True,
-            norm_layer=None, cl_norm_layer=None, cross_stage=False):
+        self,
+        in_chs,
+        out_chs,
+        stride=2,
+        depth=2,
+        dp_rates=None,
+        ls_init_value=1.0,
+        conv_mlp=True,
+        norm_layer=None,
+        cl_norm_layer=None,
+        cross_stage=False,
+    ):
         super().__init__()
 
         if in_chs != out_chs or stride > 1:
@@ -210,11 +275,18 @@ class ConvNeXtStage(nn.Module):
         else:
             self.downsample = nn.Identity()
 
-        dp_rates = dp_rates or [0.] * depth
-        self.blocks = nn.Sequential(*[ConvNeXtBlock(
-            dim=out_chs, drop_path=dp_rates[j], ls_init_value=ls_init_value, conv_mlp=conv_mlp,
-            norm_layer=norm_layer if conv_mlp else cl_norm_layer)
-            for j in range(depth)]
+        dp_rates = dp_rates or [0.0] * depth
+        self.blocks = nn.Sequential(
+            *[
+                ConvNeXtBlock(
+                    dim=out_chs,
+                    drop_path=dp_rates[j],
+                    ls_init_value=ls_init_value,
+                    conv_mlp=conv_mlp,
+                    norm_layer=norm_layer if conv_mlp else cl_norm_layer,
+                )
+                for j in range(depth)
+            ]
         )
 
     def forward(self, x):
@@ -224,7 +296,7 @@ class ConvNeXtStage(nn.Module):
 
 
 class ConvNeXt(nn.Module):
-    r""" ConvNeXt
+    r"""ConvNeXt
         A PyTorch impl of : `A ConvNet for the 2020s`  - https://arxiv.org/pdf/2201.03545.pdf
 
     Args:
@@ -239,9 +311,22 @@ class ConvNeXt(nn.Module):
     """
 
     def __init__(
-            self, in_chans=3, num_classes=1000, global_pool='avg', output_stride=32, patch_size=4,
-            depths=(3, 3, 9, 3), dims=(96, 192, 384, 768),  ls_init_value=1e-6, conv_mlp=True, use_head=True,
-            head_init_scale=1., head_norm_first=False, norm_layer=None, drop_rate=0., drop_path_rate=0.,
+        self,
+        in_chans=3,
+        num_classes=1000,
+        global_pool="avg",
+        output_stride=32,
+        patch_size=4,
+        depths=(3, 3, 9, 3),
+        dims=(96, 192, 384, 768),
+        ls_init_value=1e-6,
+        conv_mlp=True,
+        use_head=True,
+        head_init_scale=1.0,
+        head_norm_first=False,
+        norm_layer=None,
+        drop_rate=0.0,
+        drop_path_rate=0.0,
     ):
         super().__init__()
         assert output_stride == 32
@@ -249,8 +334,9 @@ class ConvNeXt(nn.Module):
             norm_layer = partial(LayerNorm2d, eps=1e-6)
             cl_norm_layer = norm_layer if conv_mlp else partial(nn.LayerNorm, eps=1e-6)
         else:
-            assert conv_mlp,\
-                'If a norm_layer is specified, conv MLP must be used so all norm expect rank-4, channels-first input'
+            assert (
+                conv_mlp
+            ), "If a norm_layer is specified, conv MLP must be used so all norm expect rank-4, channels-first input"
             cl_norm_layer = norm_layer
 
         self.num_classes = num_classes
@@ -260,11 +346,14 @@ class ConvNeXt(nn.Module):
         # NOTE: this stem is a minimal form of ViT PatchEmbed, as used in SwinTransformer w/ patch_size = 4
         self.stem = nn.Sequential(
             nn.Conv2d(in_chans, dims[0], kernel_size=patch_size, stride=patch_size),
-            norm_layer(dims[0])
+            norm_layer(dims[0]),
         )
 
         self.stages = nn.Sequential()
-        dp_rates = [x.tolist() for x in torch.linspace(0, drop_path_rate, sum(depths)).split(depths)]
+        dp_rates = [
+            x.tolist()
+            for x in torch.linspace(0, drop_path_rate, sum(depths)).split(depths)
+        ]
         curr_stride = patch_size
         prev_chs = dims[0]
         stages = []
@@ -274,64 +363,109 @@ class ConvNeXt(nn.Module):
             # FIXME support dilation / output_stride
             curr_stride *= stride
             out_chs = dims[i]
-            stages.append(ConvNeXtStage(
-                prev_chs, out_chs, stride=stride,
-                depth=depths[i], dp_rates=dp_rates[i], ls_init_value=ls_init_value, conv_mlp=conv_mlp,
-                norm_layer=norm_layer, cl_norm_layer=cl_norm_layer)
+            stages.append(
+                ConvNeXtStage(
+                    prev_chs,
+                    out_chs,
+                    stride=stride,
+                    depth=depths[i],
+                    dp_rates=dp_rates[i],
+                    ls_init_value=ls_init_value,
+                    conv_mlp=conv_mlp,
+                    norm_layer=norm_layer,
+                    cl_norm_layer=cl_norm_layer,
+                )
             )
             prev_chs = out_chs
             # NOTE feature_info use currently assumes stage 0 == stride 1, rest are stride 2
-            self.feature_info += [dict(num_chs=prev_chs, reduction=curr_stride, module=f'stages.{i}')]
+            self.feature_info += [
+                dict(num_chs=prev_chs, reduction=curr_stride, module=f"stages.{i}")
+            ]
         self.stages = nn.Sequential(*stages)
 
         self.num_features = prev_chs
-        
+
         if head_norm_first:
             # norm -> global pool -> fc ordering, like most other nets (not compat with FB weights)
-            self.norm_pre = norm_layer(self.num_features)  # final norm layer, before pooling
+            self.norm_pre = norm_layer(
+                self.num_features
+            )  # final norm layer, before pooling
             if use_head:
-                self.head = ClassifierHead(self.num_features, num_classes, pool_type=global_pool, drop_rate=drop_rate)
+                self.head = ClassifierHead(
+                    self.num_features,
+                    num_classes,
+                    pool_type=global_pool,
+                    drop_rate=drop_rate,
+                )
         else:
             # pool -> norm -> fc, the default ConvNeXt ordering (pretrained FB weights)
             self.norm_pre = nn.Identity()
             if use_head:
-                self.head = nn.Sequential(OrderedDict([
-                    ('global_pool', SelectAdaptivePool2d(pool_type=global_pool)),
-                    ('norm', norm_layer(self.num_features)),
-                    ('flatten', nn.Flatten(1) if global_pool else nn.Identity()),
-                    ('drop', nn.Dropout(self.drop_rate)),
-                    ('fc', nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity())
-                ]))
+                self.head = nn.Sequential(
+                    OrderedDict(
+                        [
+                            (
+                                "global_pool",
+                                SelectAdaptivePool2d(pool_type=global_pool),
+                            ),
+                            ("norm", norm_layer(self.num_features)),
+                            (
+                                "flatten",
+                                nn.Flatten(1) if global_pool else nn.Identity(),
+                            ),
+                            ("drop", nn.Dropout(self.drop_rate)),
+                            (
+                                "fc",
+                                nn.Linear(self.num_features, num_classes)
+                                if num_classes > 0
+                                else nn.Identity(),
+                            ),
+                        ]
+                    )
+                )
 
         named_apply(partial(_init_weights, head_init_scale=head_init_scale), self)
 
     def get_classifier(self):
         return self.head.fc
 
-    def reset_classifier(self, num_classes=0, global_pool='avg'):
+    def reset_classifier(self, num_classes=0, global_pool="avg"):
         if isinstance(self.head, ClassifierHead):
             # norm -> global pool -> fc
             self.head = ClassifierHead(
-                self.num_features, num_classes, pool_type=global_pool, drop_rate=self.drop_rate)
+                self.num_features,
+                num_classes,
+                pool_type=global_pool,
+                drop_rate=self.drop_rate,
+            )
         else:
             # pool -> norm -> fc
-            self.head = nn.Sequential(OrderedDict([
-                ('global_pool', SelectAdaptivePool2d(pool_type=global_pool)),
-                ('norm', self.head.norm),
-                ('flatten', nn.Flatten(1) if global_pool else nn.Identity()),
-                ('drop', nn.Dropout(self.drop_rate)),
-                ('fc', nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity())
-            ]))
+            self.head = nn.Sequential(
+                OrderedDict(
+                    [
+                        ("global_pool", SelectAdaptivePool2d(pool_type=global_pool)),
+                        ("norm", self.head.norm),
+                        ("flatten", nn.Flatten(1) if global_pool else nn.Identity()),
+                        ("drop", nn.Dropout(self.drop_rate)),
+                        (
+                            "fc",
+                            nn.Linear(self.num_features, num_classes)
+                            if num_classes > 0
+                            else nn.Identity(),
+                        ),
+                    ]
+                )
+            )
 
     def forward_features(self, x, return_feat=False):
         x = self.stem(x)
         out_list = []
         # import pdb; pdb.set_trace()
         for i in range(len(self.stages)):
-         x = self.stages[i](x)
-         out_list.append(x)
+            x = self.stages[i](x)
+            out_list.append(x)
         x = self.norm_pre(x)
-        
+
         return x, out_list if return_feat else x
 
     def forward(self, x):
@@ -342,49 +476,50 @@ class ConvNeXt(nn.Module):
 
 def _init_weights(module, name=None, head_init_scale=1.0):
     if isinstance(module, nn.Conv2d):
-        trunc_normal_(module.weight, std=.02)
+        trunc_normal_(module.weight, std=0.02)
         nn.init.constant_(module.bias, 0)
     elif isinstance(module, nn.Linear):
-        trunc_normal_(module.weight, std=.02)
+        trunc_normal_(module.weight, std=0.02)
         nn.init.constant_(module.bias, 0)
-        if name and 'head.' in name:
+        if name and "head." in name:
             module.weight.data.mul_(head_init_scale)
             module.bias.data.mul_(head_init_scale)
 
 
 def checkpoint_filter_fn(state_dict, model):
-    """ Remap FB checkpoints -> timm """
-    if 'model' in state_dict:
-        state_dict = state_dict['model']
+    """Remap FB checkpoints -> timm"""
+    if "model" in state_dict:
+        state_dict = state_dict["model"]
     out_dict = {}
     import re
+
     for k, v in state_dict.items():
-        k = k.replace('downsample_layers.0.', 'stem.')
-        k = re.sub(r'stages.([0-9]+).([0-9]+)', r'stages.\1.blocks.\2', k)
-        k = re.sub(r'downsample_layers.([0-9]+).([0-9]+)', r'stages.\1.downsample.\2', k)
-        k = k.replace('dwconv', 'conv_dw')
-        k = k.replace('pwconv', 'mlp.fc')
-        k = k.replace('head.', 'head.fc.')
+        k = k.replace("downsample_layers.0.", "stem.")
+        k = re.sub(r"stages.([0-9]+).([0-9]+)", r"stages.\1.blocks.\2", k)
+        k = re.sub(
+            r"downsample_layers.([0-9]+).([0-9]+)", r"stages.\1.downsample.\2", k
+        )
+        k = k.replace("dwconv", "conv_dw")
+        k = k.replace("pwconv", "mlp.fc")
+        k = k.replace("head.", "head.fc.")
         if k in model.state_dict().keys():
-            if k.startswith('norm.'):
-                k = k.replace('norm', 'head.norm')
-            if v.ndim == 2 and 'head' not in k:
+            if k.startswith("norm."):
+                k = k.replace("norm", "head.norm")
+            if v.ndim == 2 and "head" not in k:
                 model_shape = model.state_dict()[k].shape
                 v = v.reshape(model_shape)
             out_dict[k] = v
     return out_dict
 
 
-def _create_hybrid_backbone(variant='convnext_base_in22k', pretrained=False, **kwargs):
+def _create_hybrid_backbone(variant="convnext_base_in22k", pretrained=False, **kwargs):
     model = build_model_with_cfg(
-        ConvNeXt, variant, pretrained,
+        ConvNeXt,
+        variant,
+        pretrained,
         default_cfg=default_cfgs[variant],
         pretrained_filter_fn=checkpoint_filter_fn,
         feature_cfg=dict(out_indices=(0, 1, 2, 3), flatten_sequential=True),
-        **kwargs)
+        **kwargs,
+    )
     return model
-
-
-
-
-
